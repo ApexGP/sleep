@@ -6,13 +6,13 @@ This repository contains a single C source file that implements a minimal `sleep
 
 - Linux/macOS (GCC/Clang):
 
-  ```sh
+  ```bash
   cc sleep.c -nostdlib -fno-stack-protector -o sleep
   ```
 
 - Windows (MinGW):
 
-  ```sh
+  ```powershell
   gcc sleep.c -nostdlib -fno-stack-protector -o sleep.exe -lkernel32
   ```
 
