@@ -1,13 +1,51 @@
-// instruction numbered
+// ---------- platform selection ----------
 #if defined(_WIN32)
 #define PLATFORM_WINDOWS 1
-#include <windows.h>
-#include <io.h>
+#pragma comment(lib, "kernel32")
 #else
 #define PLATFORM_WINDOWS 0
 #endif
 
+// ---------- platform-specific constants / imports ----------
 #if PLATFORM_WINDOWS
+typedef unsigned long DWORD;
+typedef unsigned int UINT;
+typedef unsigned long long size_t;
+typedef int BOOL;
+typedef void *HANDLE;
+typedef char *LPSTR;
+typedef const char *LPCSTR;
+typedef void *LPVOID;
+
+#ifndef NULL
+#define NULL ((void *)0)
+#endif
+
+#define STD_OUTPUT_HANDLE ((DWORD)-11)
+#define STD_ERROR_HANDLE ((DWORD)-12)
+#define INVALID_HANDLE_VALUE ((HANDLE)(long long)-1)
+
+typedef struct OVERLAPPED {
+  unsigned long Internal;
+  unsigned long InternalHigh;
+  union {
+    struct {
+      DWORD Offset;
+      DWORD OffsetHigh;
+    };
+    void *Pointer;
+  };
+  HANDLE hEvent;
+} OVERLAPPED;
+
+__attribute__((dllimport)) HANDLE GetStdHandle(DWORD nStdHandle);
+__attribute__((dllimport)) BOOL WriteFile(HANDLE hFile, const void *lpBuffer, DWORD nNumberOfBytesToWrite, DWORD *lpNumberOfBytesWritten, OVERLAPPED *lpOverlapped);
+__attribute__((dllimport)) LPVOID GetProcessHeap(void);
+__attribute__((dllimport)) LPVOID HeapAlloc(HANDLE hHeap, DWORD dwFlags, size_t dwBytes);
+__attribute__((dllimport)) BOOL HeapFree(HANDLE hHeap, DWORD dwFlags, LPVOID lpMem);
+__attribute__((dllimport)) LPSTR GetCommandLineA(void);
+__attribute__((dllimport, noreturn)) void ExitProcess(UINT uExitCode);
+__attribute__((dllimport)) void Sleep(DWORD dwMilliseconds);
 #elif defined(__linux__)
 #define SYS_WRITE 1
 #define SYS_NANOSLEEP 35
@@ -29,59 +67,63 @@
 #define LONG_MAX_VALUE 9223372036854775807L
 #endif
 
-// timespec for func sleep
+// ---------- shared types ----------
 typedef struct timespec {
   long tv_sec;
   long tv_nsec;
 } timespec;
 
+#if PLATFORM_WINDOWS
+__attribute__((weak)) void __main(void) {}
+#endif
+
+// ---------- non-Windows syscall shims ----------
 #if !PLATFORM_WINDOWS
-// custom syscall implementation
 long syscall_1(long code, long arg1) {
   long result;
-
   __asm__ __volatile__("syscall"
                        : "=a"(result)
                        : "a"(code), "D"(arg1)
                        : "rcx", "r11", "memory");
-
   return result;
 }
 
 long syscall_2(long code, long arg1, long arg2) {
   long result;
-
   __asm__ __volatile__("syscall"
                        : "=a"(result)
                        : "a"(code), "D"(arg1), "S"(arg2)
                        : "rcx", "r11", "memory");
-
   return result;
 }
 
 long syscall_3(long code, long arg1, long arg2, long arg3) {
   long result;
-
   __asm__ __volatile__("syscall"
                        : "=a"(result)
                        : "a"(code), "D"(arg1), "S"(arg2), "d"(arg3)
                        : "rcx", "r11", "memory");
-
   return result;
 }
 #endif
 
-long unsigned strlen(const char *str) {
+// ---------- small utilities ----------
+static long unsigned my_strlen(const char *str) {
   const char *cursor = str;
-
   while (*cursor) {
     cursor++;
   }
-
-  long unsigned count = cursor - str;
-  return count;
+  return (long unsigned)(cursor - str);
 }
 
+static long unsigned my_strlen_nullok(const char *str) {
+  if (!str) {
+    return 0;
+  }
+  return my_strlen(str);
+}
+
+// ---------- I/O ----------
 long write_all(long fd, const char *str, long unsigned len) {
 #if PLATFORM_WINDOWS
   HANDLE handle = INVALID_HANDLE_VALUE;
@@ -107,7 +149,6 @@ long write_all(long fd, const char *str, long unsigned len) {
   return 0;
 #else
   long unsigned sent = 0;
-
   while (sent < len) {
     long wrote = syscall_3(SYS_WRITE, fd, (long)(str + sent), len - sent);
     if (wrote < 0) {
@@ -115,15 +156,14 @@ long write_all(long fd, const char *str, long unsigned len) {
     }
     sent += wrote;
   }
-
   return 0;
 #endif
 }
 
-void print(const char *str) { write_all(1, str, strlen(str)); }
+void print(const char *str) { write_all(1, str, my_strlen(str)); }
+void print_err(const char *str) { write_all(2, str, my_strlen(str)); }
 
-void print_err(const char *str) { write_all(2, str, strlen(str)); }
-
+// ---------- parsing ----------
 int parse_seconds(char *raw, long *out_seconds) {
   if (!raw || !*raw) {
     return -1;
@@ -155,6 +195,7 @@ int parse_seconds(char *raw, long *out_seconds) {
   return 0;
 }
 
+// ---------- sleep ----------
 long sleep_seconds(long seconds) {
 #if PLATFORM_WINDOWS
   if (seconds < 0) {
@@ -188,7 +229,8 @@ long sleep_seconds(long seconds) {
 #endif
 }
 
-int main(int argc, char *argv[]) {
+// ---------- core main ----------
+int real_main(int argc, char *argv[]) {
   if (argc != 2) {
     print_err("Usage: sleep NUMBER\nPause for NUMBER seconds\n");
     return 1;
@@ -219,15 +261,97 @@ int main(int argc, char *argv[]) {
 }
 
 #if !PLATFORM_WINDOWS
+int main(int argc, char *argv[]) { return real_main(argc, argv); }
+#endif
+
+// ---------- Windows entry / argv ----------
+#if PLATFORM_WINDOWS
+typedef struct {
+  char *storage;
+  char *argv_items[2];
+  int argc;
+} win_args;
+
+static win_args parse_windows_args(void) {
+  win_args result;
+  result.storage = NULL;
+  result.argv_items[0] = NULL;
+  result.argv_items[1] = NULL;
+  result.argc = 0;
+
+  char *cmd = GetCommandLineA();
+  if (!cmd) {
+    return result;
+  }
+
+  long unsigned len = my_strlen_nullok(cmd);
+  HANDLE heap = GetProcessHeap();
+  char *buffer = (char *)HeapAlloc(heap, 0, len + 1);
+  if (!buffer) {
+    return result;
+  }
+
+  for (long unsigned i = 0; i <= len; i++) {
+    buffer[i] = cmd[i];
+  }
+
+  char *cursor = buffer;
+  while (*cursor == ' ' || *cursor == '\t') {
+    cursor++;
+  }
+
+  if (*cursor == '"') {
+    cursor++;
+    while (*cursor && *cursor != '"') {
+      cursor++;
+    }
+    if (*cursor == '"') {
+      cursor++;
+    }
+  } else {
+    while (*cursor && *cursor != ' ' && *cursor != '\t') {
+      cursor++;
+    }
+  }
+
+  while (*cursor == ' ' || *cursor == '\t') {
+    cursor++;
+  }
+
+  if (*cursor) {
+    result.argv_items[1] = cursor;
+    while (*cursor && *cursor != ' ' && *cursor != '\t' && *cursor != '"') {
+      cursor++;
+    }
+    *cursor = '\0';
+    result.argc = 2;
+  } else {
+    result.argc = 1;
+  }
+
+  result.storage = buffer;
+  return result;
+}
+
+__attribute__((noreturn)) void mainCRTStartup(void) {
+  win_args args = parse_windows_args();
+  int code = real_main(args.argc, args.argv_items);
+  if (args.storage) {
+    HeapFree(GetProcessHeap(), 0, args.storage);
+  }
+  ExitProcess((UINT)code);
+}
+
+// ---------- non-Windows entry ----------
+#else
 __attribute__((noreturn)) void sys_exit(long code) {
   syscall_1(SYS_EXIT, code);
   for (;;) {
   }
 }
 
-// inline assembly code for _start()
 __attribute__((naked)) void _start() {
-  __asm__ __volatile__("xor %ebp, %ebp\n"
+  __asm__ __volatile__( "xor %ebp, %ebp\n"
                         "mov (%rsp), %rdi\n"
                         "lea 8(%rsp), %rsi\n"
                         "and $-16, %rsp\n"
