@@ -21,8 +21,8 @@ typedef void *LPVOID;
 #define NULL ((void *)0)
 #endif
 
-#define STD_OUTPUT_HANDLE ((DWORD)-11)
-#define STD_ERROR_HANDLE ((DWORD)-12)
+#define STD_OUTPUT_HANDLE ((DWORD) - 11)
+#define STD_ERROR_HANDLE ((DWORD) - 12)
 #define INVALID_HANDLE_VALUE ((HANDLE)(long long)-1)
 
 typedef struct OVERLAPPED {
@@ -39,10 +39,15 @@ typedef struct OVERLAPPED {
 } OVERLAPPED;
 
 __attribute__((dllimport)) HANDLE GetStdHandle(DWORD nStdHandle);
-__attribute__((dllimport)) BOOL WriteFile(HANDLE hFile, const void *lpBuffer, DWORD nNumberOfBytesToWrite, DWORD *lpNumberOfBytesWritten, OVERLAPPED *lpOverlapped);
+__attribute__((dllimport)) BOOL WriteFile(HANDLE hFile, const void *lpBuffer,
+                                          DWORD nNumberOfBytesToWrite,
+                                          DWORD *lpNumberOfBytesWritten,
+                                          OVERLAPPED *lpOverlapped);
 __attribute__((dllimport)) LPVOID GetProcessHeap(void);
-__attribute__((dllimport)) LPVOID HeapAlloc(HANDLE hHeap, DWORD dwFlags, size_t dwBytes);
-__attribute__((dllimport)) BOOL HeapFree(HANDLE hHeap, DWORD dwFlags, LPVOID lpMem);
+__attribute__((dllimport)) LPVOID HeapAlloc(HANDLE hHeap, DWORD dwFlags,
+                                            size_t dwBytes);
+__attribute__((dllimport)) BOOL HeapFree(HANDLE hHeap, DWORD dwFlags,
+                                         LPVOID lpMem);
 __attribute__((dllimport)) LPSTR GetCommandLineA(void);
 __attribute__((dllimport, noreturn)) void ExitProcess(UINT uExitCode);
 __attribute__((dllimport)) void Sleep(DWORD dwMilliseconds);
@@ -52,7 +57,7 @@ __attribute__((dllimport)) void Sleep(DWORD dwMilliseconds);
 #define SYS_EXIT 60
 #elif defined(__APPLE__)
 #define SYS_WRITE 0x2000004
-#define SYS_NANOSLEEP 0x20000F0
+#define SYS_SELECT 0x200005D
 #define SYS_EXIT 0x2000001
 #else
 #error Unsupported platform
@@ -73,12 +78,18 @@ typedef struct timespec {
   long tv_nsec;
 } timespec;
 
+typedef struct timeval {
+  long tv_sec;
+  long tv_usec;
+} timeval;
+
 #if PLATFORM_WINDOWS
 __attribute__((weak)) void __main(void) {}
 #endif
 
 // ---------- non-Windows syscall shims ----------
 #if !PLATFORM_WINDOWS
+#if defined(__x86_64__)
 long syscall_1(long code, long arg1) {
   long result;
   __asm__ __volatile__("syscall"
@@ -105,6 +116,79 @@ long syscall_3(long code, long arg1, long arg2, long arg3) {
                        : "rcx", "r11", "memory");
   return result;
 }
+
+long syscall_5(long code, long arg1, long arg2, long arg3, long arg4,
+               long arg5) {
+  long result;
+  __asm__ __volatile__("mov %4, %%r10\n\t"
+                       "mov %5, %%r8\n\t"
+                       "syscall"
+                       : "=a"(result)
+                       : "a"(code), "D"(arg1), "S"(arg2), "d"(arg3), "r"(arg4),
+                         "r"(arg5)
+                       : "rcx", "r11", "r8", "r10", "memory");
+  return result;
+}
+#elif defined(__aarch64__) || defined(__arm64__)
+long syscall_1(long code, long arg1) {
+  long result;
+  __asm__ __volatile__("mov x16, %1\n\t"
+                       "mov x0, %2\n\t"
+                       "svc #0\n\t"
+                       "mov %0, x0"
+                       : "=r"(result)
+                       : "r"(code), "r"(arg1)
+                       : "x0", "x16", "memory");
+  return result;
+}
+
+long syscall_2(long code, long arg1, long arg2) {
+  long result;
+  __asm__ __volatile__("mov x16, %1\n\t"
+                       "mov x0, %2\n\t"
+                       "mov x1, %3\n\t"
+                       "svc #0\n\t"
+                       "mov %0, x0"
+                       : "=r"(result)
+                       : "r"(code), "r"(arg1), "r"(arg2)
+                       : "x0", "x1", "x16", "memory");
+  return result;
+}
+
+long syscall_3(long code, long arg1, long arg2, long arg3) {
+  long result;
+  __asm__ __volatile__("mov x16, %1\n\t"
+                       "mov x0, %2\n\t"
+                       "mov x1, %3\n\t"
+                       "mov x2, %4\n\t"
+                       "svc #0\n\t"
+                       "mov %0, x0"
+                       : "=r"(result)
+                       : "r"(code), "r"(arg1), "r"(arg2), "r"(arg3)
+                       : "x0", "x1", "x2", "x16", "memory");
+  return result;
+}
+
+long syscall_5(long code, long arg1, long arg2, long arg3, long arg4,
+               long arg5) {
+  long result;
+  __asm__ __volatile__("mov x16, %1\n\t"
+                       "mov x0, %2\n\t"
+                       "mov x1, %3\n\t"
+                       "mov x2, %4\n\t"
+                       "mov x3, %5\n\t"
+                       "mov x4, %6\n\t"
+                       "svc #0\n\t"
+                       "mov %0, x0"
+                       : "=r"(result)
+                       : "r"(code), "r"(arg1), "r"(arg2), "r"(arg3), "r"(arg4),
+                         "r"(arg5)
+                       : "x0", "x1", "x2", "x3", "x4", "x16", "memory");
+  return result;
+}
+#else
+#error Unsupported architecture for syscall shims
+#endif
 #endif
 
 // ---------- small utilities ----------
@@ -138,7 +222,8 @@ long write_all(long fd, const char *str, long unsigned len) {
 
   unsigned long long sent = 0;
   while (sent < len) {
-    DWORD chunk = (DWORD)((len - sent) > 0xFFFFFFFFu ? 0xFFFFFFFFu : (len - sent));
+    DWORD chunk =
+        (DWORD)((len - sent) > 0xFFFFFFFFu ? 0xFFFFFFFFu : (len - sent));
     DWORD wrote = 0;
     if (!WriteFile(handle, str + sent, chunk, &wrote, NULL) || wrote == 0) {
       return -1;
@@ -210,13 +295,14 @@ long sleep_seconds(long seconds) {
     seconds = 0;
   }
   return 0;
-#else
+#elif defined(__linux__)
   timespec request = {0};
   timespec remaining = {0};
   request.tv_sec = seconds;
 
   while (1) {
-    long result = syscall_2(SYS_NANOSLEEP, (long)(&request), (long)(&remaining));
+    long result =
+        syscall_2(SYS_NANOSLEEP, (long)(&request), (long)(&remaining));
     if (result == 0) {
       return 0;
     }
@@ -226,6 +312,13 @@ long sleep_seconds(long seconds) {
     }
     return result;
   }
+#else
+  /* macOS: no direct nanosleep syscall, use select(0,NULL,NULL,NULL,&tv) */
+  timeval tv = {0};
+  tv.tv_sec = seconds;
+  tv.tv_usec = 0;
+  long result = syscall_5(SYS_SELECT, 0, 0, 0, 0, (long)(&tv));
+  return (result < 0) ? result : 0;
 #endif
 }
 
@@ -350,13 +443,24 @@ __attribute__((noreturn)) void sys_exit(long code) {
   }
 }
 
-__attribute__((naked)) void _start() {
-  __asm__ __volatile__( "xor %ebp, %ebp\n"
-                        "mov (%rsp), %rdi\n"
-                        "lea 8(%rsp), %rsi\n"
-                        "and $-16, %rsp\n"
-                        "call main\n"
-                        "mov %rax, %rdi\n"
-                        "call sys_exit\n");
+#if defined(__x86_64__)
+__attribute__((naked)) void _start(void) {
+  __asm__ __volatile__("xor %ebp, %ebp\n"
+                       "mov (%rsp), %rdi\n"
+                       "lea 8(%rsp), %rsi\n"
+                       "and $-16, %rsp\n"
+                       "call main\n"
+                       "mov %rax, %rdi\n"
+                       "call sys_exit\n");
 }
+#elif defined(__aarch64__) || defined(__arm64__)
+__attribute__((naked)) void _start(void) {
+  /* dyld passes argc in x0, argv in x1 when calling program entry */
+  __asm__ __volatile__("bl _main\n"
+                       "bl _sys_exit\n"
+                       "b .\n");
+}
+#else
+#error Unsupported architecture for _start
+#endif
 #endif
